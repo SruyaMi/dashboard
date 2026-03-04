@@ -2031,7 +2031,11 @@
   <script>
     /* ===== STOCK MONITORING MODULE (Yahoo Finance) ===== */
     const WATCHLIST_STORAGE_KEY = 'stock_watchlist_yf';
-    const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+    const CORS_PROXIES = [
+      'https://corsproxy.io/?',
+      'https://api.allorigins.win/raw?url=',
+    ];
+    let currentProxyIndex = 0;
 
     const POPULAR_STOCKS = [
       { symbol: 'AAPL', description: 'Apple Inc.' },
@@ -2066,14 +2070,20 @@
 
     // ===== YAHOO FINANCE API (via CORS proxy) =====
     async function yfFetch(url) {
-      try {
-        const res = await fetch(CORS_PROXY + encodeURIComponent(url));
-        if (!res.ok) throw new Error('API Error');
-        return await res.json();
-      } catch (e) {
-        console.error('YF fetch error:', e);
-        return null;
+      for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
+        const proxyIdx = (currentProxyIndex + attempt) % CORS_PROXIES.length;
+        try {
+          const res = await fetch(CORS_PROXIES[proxyIdx] + encodeURIComponent(url));
+          if (!res.ok) throw new Error('API Error');
+          const data = await res.json();
+          currentProxyIndex = proxyIdx; // remember working proxy
+          return data;
+        } catch (e) {
+          console.warn(`Proxy ${proxyIdx} failed, trying next...`, e.message);
+        }
       }
+      console.error('All proxies failed for:', url);
+      return null;
     }
 
     async function fetchQuote(symbol) {
