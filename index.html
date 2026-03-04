@@ -1397,8 +1397,7 @@
     <!-- STOCK MONITORING -->
     <section class="section" id="stock-section">
       <div class="section-title"><span class="icon">📈</span> 주식 모니터링</div>
-      <div id="stock-api-area"></div>
-      <div id="stock-main" style="display:none;">
+      <div id="stock-main">
         <div class="stock-header">
           <div class="stock-search-wrap">
             <span class="stock-search-icon">🔍</span>
@@ -2030,11 +2029,10 @@
   <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 
   <script>
-    /* ===== STOCK MONITORING MODULE ===== */
-    const FINNHUB_STORAGE_KEY = 'finnhub_api_key';
-    const WATCHLIST_STORAGE_KEY = 'stock_watchlist';
+    /* ===== STOCK MONITORING MODULE (Yahoo Finance) ===== */
+    const WATCHLIST_STORAGE_KEY = 'stock_watchlist_yf';
+    const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
 
-    // Popular stocks for quick search
     const POPULAR_STOCKS = [
       { symbol: 'AAPL', description: 'Apple Inc.' },
       { symbol: 'MSFT', description: 'Microsoft Corporation' },
@@ -2051,14 +2049,13 @@
       { symbol: 'BABA', description: 'Alibaba Group' },
       { symbol: 'INTC', description: 'Intel Corporation' },
       { symbol: 'CRM', description: 'Salesforce Inc.' },
-      { symbol: 'PYPL', description: 'PayPal Holdings' },
-      { symbol: 'COIN', description: 'Coinbase Global' },
-      { symbol: 'UBER', description: 'Uber Technologies' },
-      { symbol: 'SQ', description: 'Block Inc.' },
-      { symbol: 'SPOT', description: 'Spotify Technology' },
+      { symbol: '005930.KS', description: '삼성전자' },
+      { symbol: '000660.KS', description: 'SK하이닉스' },
+      { symbol: '035420.KS', description: 'NAVER' },
+      { symbol: '035720.KS', description: '카카오' },
+      { symbol: '373220.KS', description: 'LG에너지솔루션' },
     ];
 
-    let stockApiKey = localStorage.getItem(FINNHUB_STORAGE_KEY) || '';
     let watchlist = JSON.parse(localStorage.getItem(WATCHLIST_STORAGE_KEY) || '[]');
     let activeStockSymbol = null;
     let stockChart = null;
@@ -2067,73 +2064,69 @@
     let searchTimeout = null;
     let refreshInterval = null;
 
-    function initStockSection() {
-      const apiArea = document.getElementById('stock-api-area');
-      const mainArea = document.getElementById('stock-main');
-
-      if (!stockApiKey) {
-        apiArea.innerHTML = `
-          <div class="stock-api-setup">
-            <p>📊 주식 데이터를 보려면 <a href="https://finnhub.io/register" target="_blank" style="color:var(--accent-purple);font-weight:600;">Finnhub.io</a>에서 무료 API 키를 발급받으세요.</p>
-            <p style="font-size:0.78rem;color:var(--text-muted);margin-bottom:16px;">회원가입 후 Dashboard에서 API Key를 복사해주세요 (무료 60 호출/분)</p>
-            <div>
-              <input type="text" class="stock-api-input" id="api-key-input" placeholder="API 키 입력...">
-              <button class="stock-api-save-btn" onclick="saveApiKey()">저장</button>
-            </div>
-          </div>
-        `;
-        mainArea.style.display = 'none';
-      } else {
-        apiArea.innerHTML = '';
-        mainArea.style.display = 'block';
-        renderWatchlist();
-        setupStockSearch();
-        startAutoRefresh();
+    // ===== YAHOO FINANCE API (via CORS proxy) =====
+    async function yfFetch(url) {
+      try {
+        const res = await fetch(CORS_PROXY + encodeURIComponent(url));
+        if (!res.ok) throw new Error('API Error');
+        return await res.json();
+      } catch (e) {
+        console.error('YF fetch error:', e);
+        return null;
       }
     }
 
-    function saveApiKey() {
-      const input = document.getElementById('api-key-input');
-      const key = input.value.trim();
-      if (!key) return;
-      stockApiKey = key;
-      localStorage.setItem(FINNHUB_STORAGE_KEY, key);
-      initStockSection();
-      showToast('✅ API 키가 저장되었습니다');
-    }
-
-    // ===== FINNHUB API =====
     async function fetchQuote(symbol) {
-      try {
-        const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${stockApiKey}`);
-        if (!res.ok) throw new Error('API Error');
-        return await res.json();
-      } catch (e) {
-        console.error(`Quote fetch error for ${symbol}:`, e);
-        return null;
-      }
+      const data = await yfFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`);
+      if (!data || !data.chart || !data.chart.result) return null;
+      const r = data.chart.result[0];
+      const meta = r.meta;
+      return {
+        c: meta.regularMarketPrice,
+        pc: meta.chartPreviousClose || meta.previousClose,
+        o: meta.regularMarketOpen || meta.regularMarketPrice,
+        h: meta.regularMarketDayHigh || meta.regularMarketPrice,
+        l: meta.regularMarketDayLow || meta.regularMarketPrice,
+        d: meta.regularMarketPrice - (meta.chartPreviousClose || meta.previousClose || meta.regularMarketPrice),
+        dp: ((meta.regularMarketPrice - (meta.chartPreviousClose || meta.previousClose || meta.regularMarketPrice)) / (meta.chartPreviousClose || meta.previousClose || 1)) * 100,
+        currency: meta.currency || 'USD',
+      };
     }
 
-    async function fetchCandles(symbol, resolution, from, to) {
-      try {
-        const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=${resolution}&from=${from}&to=${to}&token=${stockApiKey}`);
-        if (!res.ok) throw new Error('API Error');
-        return await res.json();
-      } catch (e) {
-        console.error(`Candle fetch error for ${symbol}:`, e);
-        return null;
-      }
+    async function fetchCandles(symbol, range, interval) {
+      const data = await yfFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=false`);
+      if (!data || !data.chart || !data.chart.result) return null;
+      const r = data.chart.result[0];
+      if (!r.timestamp || !r.indicators || !r.indicators.quote || !r.indicators.quote[0]) return null;
+      const q = r.indicators.quote[0];
+      return {
+        t: r.timestamp,
+        o: q.open,
+        h: q.high,
+        l: q.low,
+        c: q.close,
+        v: q.volume,
+        currency: r.meta.currency || 'USD',
+      };
     }
 
     async function searchSymbol(query) {
-      try {
-        const res = await fetch(`https://finnhub.io/api/v1/search?q=${encodeURIComponent(query)}&token=${stockApiKey}`);
-        if (!res.ok) throw new Error('API Error');
-        return await res.json();
-      } catch (e) {
-        console.error('Search error:', e);
-        return { result: [] };
-      }
+      const data = await yfFetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0`);
+      if (!data || !data.quotes) return [];
+      return data.quotes.filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF').map(q => ({
+        symbol: q.symbol,
+        description: q.shortname || q.longname || q.symbol,
+        type: q.quoteType,
+        exchange: q.exchDisp || '',
+      }));
+    }
+
+    function getCurrencySymbol(currency) {
+      if (currency === 'KRW') return '₩';
+      if (currency === 'JPY') return '¥';
+      if (currency === 'EUR') return '€';
+      if (currency === 'GBP') return '£';
+      return '$';
     }
 
     // ===== WATCHLIST =====
@@ -2146,7 +2139,7 @@
         showToast('⚠️ 이미 관심종목에 있습니다');
         return;
       }
-      watchlist.push({ symbol, name, price: 0, change: 0, changePercent: 0, prevClose: 0 });
+      watchlist.push({ symbol, name, price: 0, change: 0, changePercent: 0, prevClose: 0, currency: 'USD' });
       saveWatchlist();
       refreshWatchlistData();
       showToast(`⭐ ${symbol} 관심종목 추가`);
@@ -2174,11 +2167,18 @@
           item.low = quote.l || 0;
           item.open = quote.o || 0;
           item.prevClose = quote.pc || 0;
+          item.currency = quote.currency || 'USD';
         }
       });
       await Promise.all(promises);
       saveWatchlist();
       renderWatchlist();
+    }
+
+    function formatPrice(price, currency) {
+      const sym = getCurrencySymbol(currency);
+      if (currency === 'KRW') return `${sym}${Math.round(price).toLocaleString()}`;
+      return `${sym}${price.toFixed(2)}`;
     }
 
     function renderWatchlist() {
@@ -2192,15 +2192,16 @@
       watchlist.forEach(item => {
         const changeClass = item.change > 0 ? 'up' : item.change < 0 ? 'down' : 'flat';
         const changeSign = item.change > 0 ? '+' : '';
+        const cur = item.currency || 'USD';
         const card = document.createElement('div');
         card.className = 'stock-card' + (activeStockSymbol === item.symbol ? ' active' : '');
         card.innerHTML = `
           <div class="stock-card-header">
-            <span class="ticker-label">${item.symbol}</span>
+            <span class="ticker-label">${item.symbol.replace('.KS', '').replace('.KQ', '')}</span>
             <button class="stock-remove-btn" onclick="event.stopPropagation(); removeFromWatchlist('${item.symbol}')" title="관심종목 제거">✕</button>
           </div>
           <div class="company-name">${item.name || item.symbol}</div>
-          <div class="price">$${item.price ? item.price.toFixed(2) : '—'}</div>
+          <div class="price">${item.price ? formatPrice(item.price, cur) : '—'}</div>
           <div class="change ${changeClass}">
             ${item.price ? `${changeSign}${item.change.toFixed(2)} (${changeSign}${item.changePercent.toFixed(2)}%)` : '로딩 중...'}
           </div>
@@ -2211,6 +2212,12 @@
     }
 
     // ===== SEARCH =====
+    function initStockSection() {
+      renderWatchlist();
+      setupStockSearch();
+      startAutoRefresh();
+    }
+
     function setupStockSearch() {
       const input = document.getElementById('stock-search-input');
       const dropdown = document.getElementById('stock-dropdown');
@@ -2223,33 +2230,25 @@
           return;
         }
 
-        // Show local matches immediately
         const localMatches = POPULAR_STOCKS.filter(s =>
           s.symbol.toLowerCase().includes(q.toLowerCase()) ||
           s.description.toLowerCase().includes(q.toLowerCase())
         ).slice(0, 6);
 
         if (localMatches.length > 0) {
-          renderDropdown(localMatches.map(m => ({ symbol: m.symbol, description: m.description, type: 'Common Stock' })));
+          renderDropdown(localMatches.map(m => ({ symbol: m.symbol, description: m.description, type: 'Stock' })));
         }
 
-        // API search with debounce
         searchTimeout = setTimeout(async () => {
-          const result = await searchSymbol(q);
-          if (result && result.result && result.result.length > 0) {
-            const filtered = result.result
-              .filter(r => r.type === 'Common Stock' || r.type === 'ADR' || r.type === 'ETP')
-              .slice(0, 8);
-            if (filtered.length > 0) {
-              renderDropdown(filtered);
-            }
+          const results = await searchSymbol(q);
+          if (results.length > 0) {
+            renderDropdown(results);
           }
         }, 400);
       });
 
       input.addEventListener('focus', () => {
         if (input.value.trim().length > 0) return;
-        // Show popular stocks on focus
         renderDropdown(POPULAR_STOCKS.slice(0, 8).map(s => ({ symbol: s.symbol, description: s.description, type: 'Popular' })));
       });
 
@@ -2268,9 +2267,9 @@
         div.className = 'stock-dropdown-item';
         const inWatchlist = watchlist.some(w => w.symbol === item.symbol);
         div.innerHTML = `
-          <span class="ticker">${item.symbol}</span>
+          <span class="ticker">${item.symbol.replace('.KS', '').replace('.KQ', '')}</span>
           <span class="name">${item.description}</span>
-          <span class="type-badge">${inWatchlist ? '⭐' : item.type || 'Stock'}</span>
+          <span class="type-badge">${inWatchlist ? '⭐' : item.exchange || item.type || 'Stock'}</span>
         `;
         div.addEventListener('click', () => {
           addToWatchlist(item.symbol, item.description);
@@ -2284,26 +2283,31 @@
     }
 
     // ===== CHART =====
+    const RANGE_MAP = {
+      1: { range: '1d', interval: '5m' },
+      7: { range: '5d', interval: '15m' },
+      30: { range: '1mo', interval: '1d' },
+      90: { range: '3mo', interval: '1d' },
+    };
+
     async function showStockChart(symbol) {
       activeStockSymbol = symbol;
-      renderWatchlist(); // Update active state
+      renderWatchlist();
 
       const chartArea = document.getElementById('stock-chart-area');
       chartArea.style.display = 'block';
 
-      // Find stock info
-      const stockInfo = watchlist.find(w => w.symbol === symbol) || { symbol, name: symbol };
+      const stockInfo = watchlist.find(w => w.symbol === symbol) || { symbol, name: symbol, currency: 'USD' };
+      const cur = stockInfo.currency || 'USD';
 
-      // Update header
       const changeClass = (stockInfo.change || 0) > 0 ? 'up' : (stockInfo.change || 0) < 0 ? 'down' : 'flat';
       const changeSign = (stockInfo.change || 0) > 0 ? '+' : '';
       document.getElementById('chart-ticker-info').innerHTML = `
-        <span class="ticker">${symbol}</span>
-        <span class="price" style="color:var(--text-primary)">$${stockInfo.price ? stockInfo.price.toFixed(2) : '—'}</span>
-        <span class="change ${changeClass}">${stockInfo.price ? `${changeSign}${(stockInfo.change || 0).toFixed(2)} (${changeSign}${(stockInfo.changePercent || 0).toFixed(2)}%)` : ''}</span>
+        <span class="ticker">${symbol.replace('.KS', '').replace('.KQ', '')}</span>
+        <span class="price" style="color:var(--text-primary)">${stockInfo.price ? formatPrice(stockInfo.price, cur) : '—'}</span>
+        <span class="change ${changeClass}">${stockInfo.price ? `${changeSign}${stockInfo.change.toFixed(2)} (${changeSign}${stockInfo.changePercent.toFixed(2)}%)` : ''}</span>
       `;
 
-      // Setup period buttons
       const periodBtns = document.querySelectorAll('.chart-period-btn');
       periodBtns.forEach(btn => {
         btn.onclick = () => {
@@ -2313,29 +2317,27 @@
         };
       });
 
-      // Load chart with default period (1 week)
       const activeBtn = document.querySelector('.chart-period-btn.active');
       const days = activeBtn ? parseInt(activeBtn.dataset.days) : 7;
       await loadChartData(symbol, days);
 
-      // Update stats
       if (stockInfo.price) {
         document.getElementById('chart-stats').innerHTML = `
           <div class="chart-stat-item">
             <div class="stat-label">시가</div>
-            <div class="stat-value">$${(stockInfo.open || 0).toFixed(2)}</div>
+            <div class="stat-value">${formatPrice(stockInfo.open || 0, cur)}</div>
           </div>
           <div class="chart-stat-item">
             <div class="stat-label">고가</div>
-            <div class="stat-value" style="color:#ef4444">$${(stockInfo.high || 0).toFixed(2)}</div>
+            <div class="stat-value" style="color:#ef4444">${formatPrice(stockInfo.high || 0, cur)}</div>
           </div>
           <div class="chart-stat-item">
             <div class="stat-label">저가</div>
-            <div class="stat-value" style="color:#3b82f6">$${(stockInfo.low || 0).toFixed(2)}</div>
+            <div class="stat-value" style="color:#3b82f6">${formatPrice(stockInfo.low || 0, cur)}</div>
           </div>
           <div class="chart-stat-item">
             <div class="stat-label">전일 종가</div>
-            <div class="stat-value">$${(stockInfo.prevClose || 0).toFixed(2)}</div>
+            <div class="stat-value">${formatPrice(stockInfo.prevClose || 0, cur)}</div>
           </div>
           <div class="chart-stat-item">
             <div class="stat-label">등락률</div>
@@ -2344,7 +2346,6 @@
         `;
       }
 
-      // Scroll to chart
       chartArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
@@ -2352,21 +2353,16 @@
       const container = document.getElementById('stock-chart-container');
       container.innerHTML = '<div class="stock-loading"><span class="spinner"></span> 차트 데이터 로딩 중...</div>';
 
-      const now = Math.floor(Date.now() / 1000);
-      const from = now - (days * 24 * 60 * 60);
-      const resolution = days <= 1 ? '5' : 'D';
+      const { range, interval } = RANGE_MAP[days] || RANGE_MAP[7];
+      const candles = await fetchCandles(symbol, range, interval);
 
-      const candles = await fetchCandles(symbol, resolution, from, now);
-
-      if (!candles || candles.s !== 'ok' || !candles.t) {
+      if (!candles || !candles.t || candles.t.length === 0) {
         container.innerHTML = '<div class="stock-loading">📭 차트 데이터를 불러올 수 없습니다. (시장 휴장 또는 데이터 없음)</div>';
         return;
       }
 
-      // Clear container
       container.innerHTML = '';
 
-      // Create chart
       if (stockChart) {
         stockChart.remove();
       }
@@ -2391,11 +2387,15 @@
         },
         timeScale: {
           borderColor: 'rgba(0,0,0,0.08)',
-          timeVisible: days <= 1,
+          timeVisible: days <= 7,
         },
       });
 
-      // Add candlestick series
+      // Filter out null data points
+      const validIndices = candles.t.map((t, i) => i).filter(i =>
+        candles.o[i] != null && candles.h[i] != null && candles.l[i] != null && candles.c[i] != null
+      );
+
       candleSeries = stockChart.addCandlestickSeries({
         upColor: '#ef4444',
         downColor: '#3b82f6',
@@ -2405,9 +2405,8 @@
         wickUpColor: '#ef4444',
       });
 
-      // Prepare data
-      const candleData = candles.t.map((t, i) => ({
-        time: t,
+      const candleData = validIndices.map(i => ({
+        time: candles.t[i],
         open: candles.o[i],
         high: candles.h[i],
         low: candles.l[i],
@@ -2415,29 +2414,25 @@
       }));
       candleSeries.setData(candleData);
 
-      // Add volume series
-      volumeSeries = stockChart.addHistogramSeries({
-        color: 'rgba(139, 92, 246, 0.2)',
-        priceFormat: {
-          type: 'volume',
-        },
-        priceScaleId: '',
-      });
-
-      stockChart.priceScale('').applyOptions({
-        scaleMargins: { top: 0.8, bottom: 0 },
-      });
-
-      const volumeData = candles.t.map((t, i) => ({
-        time: t,
-        value: candles.v[i],
-        color: candles.c[i] >= candles.o[i] ? 'rgba(239, 68, 68, 0.2)' : 'rgba(59, 130, 246, 0.2)',
-      }));
-      volumeSeries.setData(volumeData);
+      if (candles.v) {
+        volumeSeries = stockChart.addHistogramSeries({
+          color: 'rgba(139, 92, 246, 0.2)',
+          priceFormat: { type: 'volume' },
+          priceScaleId: '',
+        });
+        stockChart.priceScale('').applyOptions({
+          scaleMargins: { top: 0.8, bottom: 0 },
+        });
+        const volumeData = validIndices.map(i => ({
+          time: candles.t[i],
+          value: candles.v[i] || 0,
+          color: candles.c[i] >= candles.o[i] ? 'rgba(239, 68, 68, 0.2)' : 'rgba(59, 130, 246, 0.2)',
+        }));
+        volumeSeries.setData(volumeData);
+      }
 
       stockChart.timeScale().fitContent();
 
-      // Handle resize
       const resizeObserver = new ResizeObserver(() => {
         if (stockChart) {
           stockChart.applyOptions({ width: container.clientWidth });
@@ -2456,7 +2451,7 @@
         if (watchlist.length > 0) {
           refreshWatchlistData();
         }
-      }, 30000); // 30 seconds
+      }, 60000); // 60 seconds (Yahoo is more rate-limited)
     }
 
     // ===== INIT =====
